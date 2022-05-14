@@ -196,13 +196,19 @@ class IPFSStore(ContentAddressableStore):
         elif isinstance(codec, int):
             codec = multicodec.get(code=codec)
 
-        res = requests.post(self._host + "/api/v0/dag/put",
-                            params={"store-codec": "dag-pb" if codec.name == "raw" else codec.name,
+        if codec.name == "raw":
+            res = requests.post(self._host + "/api/v0/add",
+                                files={"dummy": raw_value})
+            res.raise_for_status()
+            return CID.decode(res.json()["Hash"])
+        else:
+            res = requests.post(self._host + "/api/v0/dag/put",
+                            params={"store-codec": codec.name,
                                     "input-codec": codec.name,
                                     "hash": self._default_hash.name},
                             files={"dummy": raw_value})
-        res.raise_for_status()
-        return CID.decode(res.json()["Cid"]["/"])
+            res.raise_for_status()
+            return CID.decode(res.json()["Cid"]["/"])
 
 
 def iter_links(o: DagCborEncodable) -> Iterator[CID]:
