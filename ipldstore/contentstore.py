@@ -15,7 +15,7 @@ from .utils import StreamLike
 
 ValueType = Union[bytes, DagCborEncodable]
 
-RawCodec = multicodec.get("raw")
+RawCodec = multicodec.get("dag-pb")
 DagCborCodec = multicodec.get("dag-cbor")
 
 
