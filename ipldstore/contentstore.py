@@ -199,7 +199,7 @@ class IPFSStore(ContentAddressableStore):
         elif isinstance(codec, int):
             codec = multicodec.get(code=codec)
 
-        if codec.name == "raw":
+        if codec.name == "dag-pb":
             res = requests.post(self._host + "/api/v0/add",
                                 files={"dummy": raw_value})
             res.raise_for_status()
