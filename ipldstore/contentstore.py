@@ -15,7 +15,7 @@ from .utils import StreamLike
 
 ValueType = Union[bytes, DagCborEncodable]
 
-RawCodec = multicodec.get("dag-pb")
+RawCodec = multicodec.get("raw")
 DagCborCodec = multicodec.get("dag-cbor")
 
 
@@ -197,7 +197,7 @@ class IPFSStore(ContentAddressableStore):
             codec = multicodec.get(code=codec)
 
         res = requests.post(self._host + "/api/v0/dag/put",
-                            params={"store-codec": codec.name,
+                            params={"store-codec": "dag-pb" if codec.name == "raw" else codec.name,
                                     "input-codec": codec.name,
                                     "hash": self._default_hash.name},
                             files={"dummy": raw_value})
