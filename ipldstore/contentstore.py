@@ -15,7 +15,7 @@ from .utils import StreamLike
 
 ValueType = Union[bytes, DagCborEncodable]
 
-RawCodec = multicodec.get("raw")
+RawCodec = multicodec.get("dag-pb")
 DagCborCodec = multicodec.get("dag-cbor")
 
 
@@ -181,7 +181,7 @@ class IPFSStore(ContentAddressableStore):
 
     def get_raw(self, cid: CID) -> bytes:
         validate(cid, CID)
-        res = requests.post(self._host + "/api/v0/block/get", params={"arg": str(cid)})
+        res = requests.post(self._host + "/api/v0/cat", params={"arg": str(cid)})
         res.raise_for_status()
         return res.content
 
