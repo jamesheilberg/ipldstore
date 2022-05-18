@@ -201,6 +201,7 @@ class IPFSStore(ContentAddressableStore):
 
         if codec.name == "dag-pb":
             res = requests.post(self._host + "/api/v0/add",
+                                params={"pin": False},
                                 files={"dummy": raw_value})
             res.raise_for_status()
             return CID.decode(res.json()["Hash"])
@@ -208,6 +209,7 @@ class IPFSStore(ContentAddressableStore):
             res = requests.post(self._host + "/api/v0/dag/put",
                             params={"store-codec": codec.name,
                                     "input-codec": codec.name,
+                                    "pin": True,
                                     "hash": self._default_hash.name},
                             files={"dummy": raw_value})
             res.raise_for_status()
