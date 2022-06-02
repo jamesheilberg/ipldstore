@@ -4,6 +4,7 @@ from io import BufferedIOBase, BytesIO
 
 from multiformats import CID, multicodec, multibase, multihash, varint
 import cbor2, dag_cbor
+from cbor2 import CBORTag
 from dag_cbor.encoding import EncodableType as DagCborEncodable
 from typing_validation import validate
 
@@ -18,6 +19,8 @@ ValueType = Union[bytes, DagCborEncodable]
 RawCodec = multicodec.get("dag-pb")
 DagCborCodec = multicodec.get("dag-cbor")
 
+def default_encoder(encoder, value):
+    encoder.encode(CBORTag(42, value.encode()))
 
 class ContentAddressableStore(ABC):
     @abstractmethod
@@ -52,7 +55,7 @@ class ContentAddressableStore(ABC):
         if isinstance(value, bytes):
             return self.put_raw(value, RawCodec)
         else:
-            return self.put_raw(dag_cbor.encode(value), DagCborCodec)
+            return self.put_raw(cbor2.dumps(value, default=default_encoder), DagCborCodec)
 
     def normalize_cid(self, cid: CID) -> CID:  # pylint: disable=no-self-use
         return cid
