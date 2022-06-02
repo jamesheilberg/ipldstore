@@ -3,7 +3,7 @@ from typing import MutableMapping, Optional, Union, overload, Iterator, MutableS
 from io import BufferedIOBase, BytesIO
 
 from multiformats import CID, multicodec, multibase, multihash, varint
-import dag_cbor
+import cbor2, dag_cbor
 from dag_cbor.encoding import EncodableType as DagCborEncodable
 from typing_validation import validate
 
@@ -178,6 +178,15 @@ class IPFSStore(ContentAddressableStore):
             self._default_hash = default_hash
         else:
             self._default_hash = multihash.Multihash(codec=default_hash)
+
+    def get(self, cid: CID) -> ValueType:
+        value = self.get_raw(cid)
+        if cid.codec == RawCodec:
+            return value
+        elif cid.codec == DagCborCodec:
+            return cbor2.loads(value)
+        else:
+            raise ValueError(f"can't decode CID's codec '{cid.codec.name}'")
 
     def get_raw(self, cid: CID) -> bytes:
         validate(cid, CID)

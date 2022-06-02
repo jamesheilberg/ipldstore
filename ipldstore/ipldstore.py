@@ -56,6 +56,8 @@ class IPLDStore(MutableMappingSB):
         try:
             inline_codec = inline_objects[key_parts[-1]]
         except KeyError:
+            if not isinstance(get_value, CID):
+                get_value = CID.decode(get_value.value[1:])
             assert isinstance(get_value, CID)
             res = self._store.get(get_value)
             assert isinstance(res, bytes)
