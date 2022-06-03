@@ -20,7 +20,7 @@ RawCodec = multicodec.get("dag-pb")
 DagCborCodec = multicodec.get("dag-cbor")
 
 def default_encoder(encoder, value):
-    encoder.encode(CBORTag(42, value.encode()))
+    encoder.encode(CBORTag(42,  b'\x00' + bytes(value)))
 
 class ContentAddressableStore(ABC):
     @abstractmethod

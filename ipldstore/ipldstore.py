@@ -11,6 +11,7 @@ import json
 
 from multiformats import CID
 import dag_cbor
+from cbor2 import CBORTag
 from numcodecs.compat import ensure_bytes  # type: ignore
 
 from .contentstore import ContentAddressableStore, MappingCAStore
@@ -56,7 +57,7 @@ class IPLDStore(MutableMappingSB):
         try:
             inline_codec = inline_objects[key_parts[-1]]
         except KeyError:
-            if not isinstance(get_value, CID):
+            if isinstance(get_value, CBORTag):
                 get_value = CID.decode(get_value.value[1:])
             assert isinstance(get_value, CID)
             res = self._store.get(get_value)
