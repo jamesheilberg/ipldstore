@@ -16,7 +16,8 @@ from .utils import StreamLike
 
 ValueType = Union[bytes, DagCborEncodable]
 
-RawCodec = multicodec.get("dag-pb")
+RawCodec = multicodec.get("raw")
+DagPbCodec = multicodec.get("dag-pb")
 DagCborCodec = multicodec.get("dag-cbor")
 
 def default_encoder(encoder, value):
@@ -55,7 +56,7 @@ class ContentAddressableStore(ABC):
         if isinstance(value, bytes):
             return self.put_raw(value, RawCodec)
         else:
-            return self.put_raw(cbor2.dumps(value, default=default_encoder), DagCborCodec)
+            return self.put_raw(dag_cbor.encode(value), DagCborCodec)
 
     def normalize_cid(self, cid: CID) -> CID:  # pylint: disable=no-self-use
         return cid
@@ -170,12 +171,14 @@ class MappingCAStore(ContentAddressableStore):
 class IPFSStore(ContentAddressableStore):
     def __init__(self,
                  host: str,
+                 chunker: str = "size-262144",
                  default_hash: Union[str, int, multicodec.Multicodec, multihash.Multihash] = "sha2-256",
                  ):
         validate(host, str)
         validate(default_hash, Union[str, int, multicodec.Multicodec, multihash.Multihash])
 
         self._host = host
+        self._chunker = chunker
 
         if isinstance(default_hash, multihash.Multihash):
             self._default_hash = default_hash
@@ -184,7 +187,7 @@ class IPFSStore(ContentAddressableStore):
 
     def get(self, cid: CID) -> ValueType:
         value = self.get_raw(cid)
-        if cid.codec == RawCodec:
+        if cid.codec == DagPbCodec:
             return value
         elif cid.codec == DagCborCodec:
             return cbor2.loads(value)
@@ -193,12 +196,19 @@ class IPFSStore(ContentAddressableStore):
 
     def get_raw(self, cid: CID) -> bytes:
         validate(cid, CID)
-        if str(cid).startswith("Qm"):
+        if cid.codec == DagPbCodec:
             res = requests.post(self._host + "/api/v0/cat", params={"arg": str(cid)})
         else:
             res = requests.post(self._host + "/api/v0/block/get", params={"arg": str(cid)})
         res.raise_for_status()
         return res.content
+
+    def put(self, value: ValueType) -> CID:
+        validate(value, ValueType)
+        if isinstance(value, bytes):
+            return self.put_raw(value, DagPbCodec)
+        else:
+            return self.put_raw(cbor2.dumps(value, default=default_encoder), DagCborCodec)
 
     def put_raw(self,
                 raw_value: bytes,
@@ -211,9 +221,9 @@ class IPFSStore(ContentAddressableStore):
         elif isinstance(codec, int):
             codec = multicodec.get(code=codec)
 
-        if codec.name == "dag-pb":
+        if codec == DagPbCodec:
             res = requests.post(self._host + "/api/v0/add",
-                                params={"pin": False},
+                                params={"pin": False, "chunker": self._chunker},
                                 files={"dummy": raw_value})
             res.raise_for_status()
             return CID.decode(res.json()["Hash"])
