@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import MutableMapping, Optional, Union, overload, Iterator, MutableSet, List
 from io import BufferedIOBase, BytesIO
+from itertools import zip_longest
 
 from multiformats import CID, multicodec, multibase, multihash, varint
 import cbor2, dag_cbor
@@ -22,6 +23,17 @@ DagCborCodec = multicodec.get("dag-cbor")
 
 def default_encoder(encoder, value):
     encoder.encode(CBORTag(42,  b'\x00' + bytes(value)))
+
+
+def grouper(seq, size):
+    return (seq[pos:pos + size] for pos in range(0, len(seq), size))
+
+def count_nodes(struct):
+    if isinstance(struct, dict):
+        return 1 + sum([count_nodes(struct[k]) for k in struct])
+    if isinstance(struct, list):
+        return 1 + sum([count_nodes(ele) for ele in struct])
+    return 1
 
 class ContentAddressableStore(ABC):
     @abstractmethod
@@ -203,12 +215,29 @@ class IPFSStore(ContentAddressableStore):
         res.raise_for_status()
         return res.content
 
+    def make_tree_structure(self, struct, total_node_lim=10000, level_node_lim=500):
+        if count_nodes(struct) <= total_node_lim:
+            return struct
+        if isinstance(struct, dict):
+            for group_of_keys in grouper(struct.keys(), level_node_lim):
+                key_for_group = f"/{hash(frozenset(group_of_keys))}"
+                replacement_dict = {}
+                for k in group_of_keys:
+                    sub_struct = self.make_tree_structure(struct[k], total_node_lim, level_node_lim)
+                    replacement_dict[k] = self.put_sub_tree(sub_struct)
+                    del struct[k]
+                struct[key_for_group] = replacement_dict
+            return struct
+
+    def put_sub_tree(self, d):
+        self.put_raw(cbor2.dumps(d, default=default_encoder), DagCborCodec)
+
     def put(self, value: ValueType) -> CID:
         validate(value, ValueType)
         if isinstance(value, bytes):
             return self.put_raw(value, DagPbCodec)
         else:
-            return self.put_raw(cbor2.dumps(value, default=default_encoder), DagCborCodec)
+            return self.put_raw(cbor2.dumps(self.make_tree_structure(value), default=default_encoder), DagCborCodec)
 
     def put_raw(self,
                 raw_value: bytes,
