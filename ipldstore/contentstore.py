@@ -24,7 +24,6 @@ DagCborCodec = multicodec.get("dag-cbor")
 def default_encoder(encoder, value):
     encoder.encode(CBORTag(42,  b'\x00' + bytes(value)))
 
-
 def grouper(seq, size):
     return (seq[pos:pos + size] for pos in range(0, len(seq), size))
 
@@ -197,12 +196,30 @@ class IPFSStore(ContentAddressableStore):
         else:
             self._default_hash = multihash.Multihash(codec=default_hash)
 
+    def recover_tree(self, broken_struct):
+        if not isinstance(broken_struct, dict):
+            return broken_struct
+        all_recovered = []
+        for k in broken_struct:
+            if len(k) > 1 and k.startswith("/") and k[2:].isnumeric():
+                cid_to_recover = CID.decode(broken_struct[k].value[1:])
+                recovered = self.recover_tree(cbor2.loads(self.get_raw(cid_to_recover)))
+                all_recovered.append((k, recovered))
+            else:
+                broken_struct[k] = self.recover_tree(broken_struct[k])
+        for old_key, recovered in all_recovered:
+            del broken_struct[old_key]
+            for k in recovered:
+                broken_struct[k] = recovered[k]
+
+        return broken_struct
+
     def get(self, cid: CID) -> ValueType:
         value = self.get_raw(cid)
         if cid.codec == DagPbCodec:
             return value
         elif cid.codec == DagCborCodec:
-            return cbor2.loads(value)
+            return self.recover_tree(cbor2.loads(value))
         else:
             raise ValueError(f"can't decode CID's codec '{cid.codec.name}'")
 
@@ -215,22 +232,25 @@ class IPFSStore(ContentAddressableStore):
         res.raise_for_status()
         return res.content
 
-    def make_tree_structure(self, struct, total_node_lim=10000, level_node_lim=500):
-        if count_nodes(struct) <= total_node_lim:
+    def make_tree_structure(self, struct, level_node_lim=10000):
+        if not isinstance(struct, dict):
             return struct
-        if isinstance(struct, dict):
-            for group_of_keys in grouper(struct.keys(), level_node_lim):
-                key_for_group = f"/{hash(frozenset(group_of_keys))}"
-                replacement_dict = {}
-                for k in group_of_keys:
-                    sub_struct = self.make_tree_structure(struct[k], total_node_lim, level_node_lim)
-                    replacement_dict[k] = self.put_sub_tree(sub_struct)
-                    del struct[k]
-                struct[key_for_group] = replacement_dict
+        if len(struct) <= level_node_lim:
+            for k in struct:
+                struct[k] = self.make_tree_structure(struct[k], level_node_lim)
             return struct
+        for group_of_keys in grouper(list(struct.keys()), level_node_lim):
+            key_for_group = f"/{hash(frozenset(group_of_keys))}"
+            replacement_dict = {}
+            for k in group_of_keys:
+                replacement_dict[k] = struct[k]
+                del struct[k]
+            sub_tree = self.make_tree_structure(replacement_dict, level_node_lim)
+            struct[key_for_group] = self.put_sub_tree(sub_tree)
+        return struct
 
     def put_sub_tree(self, d):
-        self.put_raw(cbor2.dumps(d, default=default_encoder), DagCborCodec)
+        return self.put_raw(cbor2.dumps(d, default=default_encoder), DagCborCodec, should_pin=False)
 
     def put(self, value: ValueType) -> CID:
         validate(value, ValueType)
@@ -241,7 +261,8 @@ class IPFSStore(ContentAddressableStore):
 
     def put_raw(self,
                 raw_value: bytes,
-                codec: Union[str, int, multicodec.Multicodec]) -> CID:
+                codec: Union[str, int, multicodec.Multicodec],
+                should_pin=True) -> CID:
         validate(raw_value, bytes)
         validate(codec, Union[str, int, multicodec.Multicodec])
 
@@ -260,7 +281,7 @@ class IPFSStore(ContentAddressableStore):
             res = requests.post(self._host + "/api/v0/dag/put",
                             params={"store-codec": codec.name,
                                     "input-codec": codec.name,
-                                    "pin": True,
+                                    "pin": should_pin,
                                     "hash": self._default_hash.name},
                             files={"dummy": raw_value})
             res.raise_for_status()
