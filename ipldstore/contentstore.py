@@ -200,19 +200,19 @@ class IPFSStore(ContentAddressableStore):
         if not isinstance(broken_struct, dict):
             return broken_struct
         all_recovered = []
+        ret_tree = {}
         for k in broken_struct:
             if len(k) > 1 and k.startswith("/") and k[2:].isnumeric():
                 cid_to_recover = CID.decode(broken_struct[k].value[1:])
                 recovered = self.recover_tree(cbor2.loads(self.get_raw(cid_to_recover)))
-                all_recovered.append((k, recovered))
+                all_recovered.append(recovered)
             else:
-                broken_struct[k] = self.recover_tree(broken_struct[k])
-        for old_key, recovered in all_recovered:
-            del broken_struct[old_key]
+                ret_tree[k] = self.recover_tree(broken_struct[k])
+        for recovered in all_recovered:
             for k in recovered:
-                broken_struct[k] = recovered[k]
+                ret_tree[k] = self.recover_tree(recovered[k])
 
-        return broken_struct
+        return ret_tree
 
     def get(self, cid: CID) -> ValueType:
         value = self.get_raw(cid)
@@ -232,22 +232,22 @@ class IPFSStore(ContentAddressableStore):
         res.raise_for_status()
         return res.content
 
-    def make_tree_structure(self, struct, level_node_lim=10000):
-        if not isinstance(struct, dict):
-            return struct
-        if len(struct) <= level_node_lim:
-            for k in struct:
-                struct[k] = self.make_tree_structure(struct[k], level_node_lim)
-            return struct
-        for group_of_keys in grouper(list(struct.keys()), level_node_lim):
+    def make_tree_structure(self, node, limit=10000):
+        if not isinstance(node, dict):
+            return node
+        new_tree = {}
+        if len(node) <= limit:
+            for key in node:
+                new_tree[key] = self.make_tree_structure(node[key], limit)
+            return new_tree
+        for group_of_keys in grouper(list(node.keys()), limit):
             key_for_group = f"/{hash(frozenset(group_of_keys))}"
-            replacement_dict = {}
-            for k in group_of_keys:
-                replacement_dict[k] = struct[k]
-                del struct[k]
-            sub_tree = self.make_tree_structure(replacement_dict, level_node_lim)
-            struct[key_for_group] = self.put_sub_tree(sub_tree)
-        return struct
+            sub_tree = {}
+            for key in group_of_keys:
+                sub_tree[key] = self.make_tree_structure(node[key], limit)
+            sharded_sub_tree = self.make_tree_structure(sub_tree)
+            new_tree[key_for_group] = self.put_sub_tree(sharded_sub_tree)
+        return new_tree
 
     def put_sub_tree(self, d):
         return self.put_raw(cbor2.dumps(d, default=default_encoder), DagCborCodec, should_pin=False)
