@@ -27,13 +27,6 @@ def default_encoder(encoder, value):
 def grouper(seq, size):
     return (seq[pos:pos + size] for pos in range(0, len(seq), size))
 
-def count_nodes(struct):
-    if isinstance(struct, dict):
-        return 1 + sum([count_nodes(struct[k]) for k in struct])
-    if isinstance(struct, list):
-        return 1 + sum([count_nodes(ele) for ele in struct])
-    return 1
-
 class ContentAddressableStore(ABC):
     @abstractmethod
     def get_raw(self, cid: CID) -> bytes:
@@ -183,6 +176,7 @@ class IPFSStore(ContentAddressableStore):
     def __init__(self,
                  host: str,
                  chunker: str = "size-262144",
+                 max_nodes_per_level: int = 10000,
                  default_hash: Union[str, int, multicodec.Multicodec, multihash.Multihash] = "sha2-256",
                  ):
         validate(host, str)
@@ -190,6 +184,7 @@ class IPFSStore(ContentAddressableStore):
 
         self._host = host
         self._chunker = chunker
+        self._max_nodes_per_level = max_nodes_per_level
 
         if isinstance(default_hash, multihash.Multihash):
             self._default_hash = default_hash
@@ -232,22 +227,21 @@ class IPFSStore(ContentAddressableStore):
         res.raise_for_status()
         return res.content
 
-    def make_tree_structure(self, node, limit=10000):
+    def make_tree_structure(self, node):
         if not isinstance(node, dict):
             return node
         new_tree = {}
-        if len(node) <= limit:
+        if len(node) <= self._max_nodes_per_level:
             for key in node:
-                new_tree[key] = self.make_tree_structure(node[key], limit)
+                new_tree[key] = self.make_tree_structure(node[key])
             return new_tree
-        for group_of_keys in grouper(list(node.keys()), limit):
+        for group_of_keys in grouper(list(node.keys()), self._max_nodes_per_level):
             key_for_group = f"/{hash(frozenset(group_of_keys))}"
             sub_tree = {}
             for key in group_of_keys:
-                sub_tree[key] = self.make_tree_structure(node[key], limit)
-            sharded_sub_tree = self.make_tree_structure(sub_tree)
-            new_tree[key_for_group] = self.put_sub_tree(sharded_sub_tree)
-        return new_tree
+                sub_tree[key] = node[key]
+            new_tree[key_for_group] = self.put_sub_tree(self.make_tree_structure(sub_tree))
+        return self.make_tree_structure(new_tree)
 
     def put_sub_tree(self, d):
         return self.put_raw(cbor2.dumps(d, default=default_encoder), DagCborCodec, should_pin=False)

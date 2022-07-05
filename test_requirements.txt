@@ -5,3 +5,4 @@ cbor2
 xarray
 fsspec
 jinja2
+ipfshttpclient
