@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import MutableMapping, Optional, Union, overload, Iterator, MutableSet, List
 from io import BufferedIOBase, BytesIO
+from itertools import zip_longest
 
 from multiformats import CID, multicodec, multibase, multihash, varint
 import cbor2, dag_cbor
@@ -22,6 +23,9 @@ DagCborCodec = multicodec.get("dag-cbor")
 
 def default_encoder(encoder, value):
     encoder.encode(CBORTag(42,  b'\x00' + bytes(value)))
+
+def grouper(seq, size):
+    return (seq[pos:pos + size] for pos in range(0, len(seq), size))
 
 class ContentAddressableStore(ABC):
     @abstractmethod
@@ -172,6 +176,7 @@ class IPFSStore(ContentAddressableStore):
     def __init__(self,
                  host: str,
                  chunker: str = "size-262144",
+                 max_nodes_per_level: int = 10000,
                  default_hash: Union[str, int, multicodec.Multicodec, multihash.Multihash] = "sha2-256",
                  ):
         validate(host, str)
@@ -179,18 +184,37 @@ class IPFSStore(ContentAddressableStore):
 
         self._host = host
         self._chunker = chunker
+        self._max_nodes_per_level = max_nodes_per_level
 
         if isinstance(default_hash, multihash.Multihash):
             self._default_hash = default_hash
         else:
             self._default_hash = multihash.Multihash(codec=default_hash)
 
+    def recover_tree(self, broken_struct):
+        if not isinstance(broken_struct, dict):
+            return broken_struct
+        all_recovered = []
+        ret_tree = {}
+        for k in broken_struct:
+            if len(k) > 1 and k.startswith("/") and k[2:].isnumeric():
+                cid_to_recover = CID.decode(broken_struct[k].value[1:])
+                recovered = self.recover_tree(cbor2.loads(self.get_raw(cid_to_recover)))
+                all_recovered.append(recovered)
+            else:
+                ret_tree[k] = self.recover_tree(broken_struct[k])
+        for recovered in all_recovered:
+            for k in recovered:
+                ret_tree[k] = self.recover_tree(recovered[k])
+
+        return ret_tree
+
     def get(self, cid: CID) -> ValueType:
         value = self.get_raw(cid)
         if cid.codec == DagPbCodec:
             return value
         elif cid.codec == DagCborCodec:
-            return cbor2.loads(value)
+            return self.recover_tree(cbor2.loads(value))
         else:
             raise ValueError(f"can't decode CID's codec '{cid.codec.name}'")
 
@@ -203,16 +227,36 @@ class IPFSStore(ContentAddressableStore):
         res.raise_for_status()
         return res.content
 
+    def make_tree_structure(self, node):
+        if not isinstance(node, dict):
+            return node
+        new_tree = {}
+        if len(node) <= self._max_nodes_per_level:
+            for key in node:
+                new_tree[key] = self.make_tree_structure(node[key])
+            return new_tree
+        for group_of_keys in grouper(list(node.keys()), self._max_nodes_per_level):
+            key_for_group = f"/{hash(frozenset(group_of_keys))}"
+            sub_tree = {}
+            for key in group_of_keys:
+                sub_tree[key] = node[key]
+            new_tree[key_for_group] = self.put_sub_tree(self.make_tree_structure(sub_tree))
+        return self.make_tree_structure(new_tree)
+
+    def put_sub_tree(self, d):
+        return self.put_raw(cbor2.dumps(d, default=default_encoder), DagCborCodec, should_pin=False)
+
     def put(self, value: ValueType) -> CID:
         validate(value, ValueType)
         if isinstance(value, bytes):
             return self.put_raw(value, DagPbCodec)
         else:
-            return self.put_raw(cbor2.dumps(value, default=default_encoder), DagCborCodec)
+            return self.put_raw(cbor2.dumps(self.make_tree_structure(value), default=default_encoder), DagCborCodec)
 
     def put_raw(self,
                 raw_value: bytes,
-                codec: Union[str, int, multicodec.Multicodec]) -> CID:
+                codec: Union[str, int, multicodec.Multicodec],
+                should_pin=True) -> CID:
         validate(raw_value, bytes)
         validate(codec, Union[str, int, multicodec.Multicodec])
 
@@ -231,7 +275,7 @@ class IPFSStore(ContentAddressableStore):
             res = requests.post(self._host + "/api/v0/dag/put",
                             params={"store-codec": codec.name,
                                     "input-codec": codec.name,
-                                    "pin": True,
+                                    "pin": should_pin,
                                     "hash": self._default_hash.name},
                             files={"dummy": raw_value})
             res.raise_for_status()
