@@ -2,6 +2,8 @@
 Implementation of a MutableMapping based on IPLD data structures.
 """
 
+
+
 from io import BufferedIOBase
 from collections.abc import MutableMapping
 import sys
@@ -23,6 +25,13 @@ if sys.version_info >= (3, 9):
 else:
     from typing import MutableMapping as MutableMappingT
     MutableMappingSB = MutableMapping
+
+def storage_getitems(self, keys, on_error="omit"):
+    return self._mutable_mapping.getitems(keys)
+import zarr
+zarr.KVStore.getitems = storage_getitems
+
+
 
 @dataclass
 class InlineCodec:
@@ -50,6 +59,25 @@ class IPLDStore(MutableMappingSB):
         self._store = castore or MappingCAStore()
         self.sep = sep
         self.root_cid: Optional[CID] = None
+
+    def getitems(self, keys):
+        ret = {}
+        cid_mapping = {}
+        to_iter = []
+        for k in keys:
+            key_parts = k.split(self.sep)
+            get_value = get_recursive(self._mapping, key_parts)
+            try:
+                inline_codec = inline_objects[key_parts[-1]]
+                ret[k] = inline_codec.encoder(get_value)
+            except KeyError:
+                cid_form= str(CID.decode(get_value.value[1:]))
+                cid_mapping[cid_form] = k
+                to_iter.append(str(CID.decode(get_value.value[1:])))
+        cid_store = self._store.getitems(to_iter)
+        for cid in cid_mapping:
+            ret[cid_mapping[cid]] = cid_store[cid]
+        return ret
 
     def __getitem__(self, key: str) -> bytes:
         key_parts = key.split(self.sep)

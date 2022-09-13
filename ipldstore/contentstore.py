@@ -3,6 +3,9 @@ from typing import MutableMapping, Optional, Union, overload, Iterator, MutableS
 from io import BufferedIOBase, BytesIO
 from itertools import zip_longest
 
+import aiohttp
+import asyncio
+
 from multiformats import CID, multicodec, multibase, multihash, varint
 import cbor2, dag_cbor
 from cbor2 import CBORTag
@@ -172,6 +175,24 @@ class MappingCAStore(ContentAddressableStore):
         return cid
 
 
+async def _get(host, session, cid):
+    if cid.startswith("Qm"):
+        api_method = "/api/v0/cat"
+    else:
+        api_method = "/api/v0/block/get"
+    async with session.post(host + api_method, params={"arg": str(cid)}) as resp:
+        return await resp.read()
+
+async def _main_async(keys, host, d):
+    tasks = []
+    async with aiohttp.ClientSession() as session:
+        for key in keys:
+            tasks.append(_get(host, session, key))
+        byte_list = await asyncio.gather(*tasks)
+        for i, key in enumerate(keys):
+            d[key] = byte_list[i]
+
+
 class IPFSStore(ContentAddressableStore):
     def __init__(self,
                  host: str,
@@ -217,6 +238,11 @@ class IPFSStore(ContentAddressableStore):
             return self.recover_tree(cbor2.loads(value))
         else:
             raise ValueError(f"can't decode CID's codec '{cid.codec.name}'")
+
+    def getitems(self, keys):
+        ret = {}
+        asyncio.run(_main_async(keys, self._host, ret))
+        return ret
 
     def get_raw(self, cid: CID) -> bytes:
         validate(cid, CID)
