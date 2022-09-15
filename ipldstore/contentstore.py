@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import MutableMapping, Optional, Union, overload, Iterator, MutableSet, List
+from typing import Dict, MutableMapping, Optional, Union, overload, Iterator, MutableSet, List
 from io import BufferedIOBase, BytesIO
 from itertools import zip_longest
 
@@ -175,19 +175,17 @@ class MappingCAStore(ContentAddressableStore):
         return cid
 
 
-async def _get(host, session, cid):
-    if cid.startswith("Qm"):
+async def _async_get(host: str, session: aiohttp.ClientSession, cid: CID):
+    if cid.codec == DagPbCodec:
         api_method = "/api/v0/cat"
     else:
         api_method = "/api/v0/block/get"
     async with session.post(host + api_method, params={"arg": str(cid)}) as resp:
         return await resp.read()
 
-async def _main_async(keys, host, d):
-    tasks = []
+async def _main_async(keys: List[CID], host: str, d: Dict[CID, bytes]):
     async with aiohttp.ClientSession() as session:
-        for key in keys:
-            tasks.append(_get(host, session, key))
+        tasks = [_async_get(host, session, key) for key in keys]
         byte_list = await asyncio.gather(*tasks)
         for i, key in enumerate(keys):
             d[key] = byte_list[i]
@@ -239,7 +237,7 @@ class IPFSStore(ContentAddressableStore):
         else:
             raise ValueError(f"can't decode CID's codec '{cid.codec.name}'")
 
-    def getitems(self, keys):
+    def getitems(self, keys: List[CID]) -> Dict[CID, bytes]:
         ret = {}
         asyncio.run(_main_async(keys, self._host, ret))
         return ret

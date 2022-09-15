@@ -16,7 +16,7 @@ import dag_cbor
 from cbor2 import CBORTag
 from numcodecs.compat import ensure_bytes  # type: ignore
 
-from .contentstore import ContentAddressableStore, MappingCAStore
+from .contentstore import ContentAddressableStore, IPFSStore, MappingCAStore
 from .utils import StreamLike
 
 if sys.version_info >= (3, 9):
@@ -25,13 +25,6 @@ if sys.version_info >= (3, 9):
 else:
     from typing import MutableMapping as MutableMappingT
     MutableMappingSB = MutableMapping
-
-def storage_getitems(self, keys, on_error="omit"):
-    return self._mutable_mapping.getitems(keys)
-import zarr
-zarr.KVStore.getitems = storage_getitems
-
-
 
 @dataclass
 class InlineCodec:
@@ -54,30 +47,40 @@ inline_objects = {
 
 
 class IPLDStore(MutableMappingSB):
-    def __init__(self, castore: Optional[ContentAddressableStore] = None, sep: str = "/"):
+    def __init__(self, castore: Optional[ContentAddressableStore] = None, sep: str = "/", should_async_get: bool = True):
         self._mapping: Dict[str, Union[bytes, dag_cbor.encoding.EncodableType]] = {}
         self._store = castore or MappingCAStore()
+        if isinstance(self._store, IPFSStore) and should_async_get:
+            # Monkey patch zarr to use the async get of multiple chunks
+            def storage_getitems(kv_self, keys, on_error="omit"):
+                return kv_self._mutable_mapping.getitems(keys)
+            import zarr
+            zarr.KVStore.getitems = storage_getitems
         self.sep = sep
         self.root_cid: Optional[CID] = None
 
-    def getitems(self, keys):
-        ret = {}
-        cid_mapping = {}
-        to_iter = []
-        for k in keys:
-            key_parts = k.split(self.sep)
+    def getitems(self, keys: List[str]) -> Dict[str, bytes]:
+        if not isinstance(self._store, IPFSStore):
+            raise NotImplementedError("Multiget of keys only supported for IPFSStore")
+        cid_to_key_map = {}
+        key_to_bytes_map = {}
+        to_async_get = []
+        for key in keys:
+            key_parts = key.split(self.sep)
             get_value = get_recursive(self._mapping, key_parts)
             try:
                 inline_codec = inline_objects[key_parts[-1]]
-                ret[k] = inline_codec.encoder(get_value)
+                key_to_bytes_map[key] = inline_codec.encoder(get_value)
             except KeyError:
-                cid_form= str(CID.decode(get_value.value[1:]))
-                cid_mapping[cid_form] = k
-                to_iter.append(str(CID.decode(get_value.value[1:])))
-        cid_store = self._store.getitems(to_iter)
-        for cid in cid_mapping:
-            ret[cid_mapping[cid]] = cid_store[cid]
-        return ret
+                if isinstance(get_value, CBORTag):
+                    get_value = CID.decode(get_value.value[1:])
+                assert isinstance(get_value, CID)
+                cid_to_key_map[get_value] = key
+                to_async_get.append(get_value)
+        cid_to_bytes_map = self._store.getitems(to_async_get)
+        for cid, key in cid_to_key_map.items():
+            key_to_bytes_map[key] = cid_to_bytes_map[cid]
+        return key_to_bytes_map
 
     def __getitem__(self, key: str) -> bytes:
         key_parts = key.split(self.sep)
