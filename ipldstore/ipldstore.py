@@ -69,14 +69,17 @@ class IPLDStore(MutableMappingSB):
             key_parts = key.split(self.sep)
             get_value = get_recursive(self._mapping, key_parts)
             try:
+                # First see if this is a special key that doesn't need to be handled by the store
                 inline_codec = inline_objects[key_parts[-1]]
                 key_to_bytes_map[key] = inline_codec.encoder(get_value)
             except KeyError:
+                # If it isn't, the key is an IPFS CID and needs to be passed to the store to be handled asynchronously
                 if isinstance(get_value, CBORTag):
                     get_value = CID.decode(get_value.value[1:])
                 assert isinstance(get_value, CID)
                 cid_to_key_map[get_value] = key
                 to_async_get.append(get_value)
+        # Get the bytes for all CIDs asynchronously
         cid_to_bytes_map = self._store.getitems(to_async_get)
         for cid, key in cid_to_key_map.items():
             key_to_bytes_map[key] = cid_to_bytes_map[cid]
