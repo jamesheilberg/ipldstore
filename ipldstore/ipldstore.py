@@ -2,6 +2,8 @@
 Implementation of a MutableMapping based on IPLD data structures.
 """
 
+
+
 from io import BufferedIOBase
 from collections.abc import MutableMapping
 import sys
@@ -14,7 +16,7 @@ import dag_cbor
 from cbor2 import CBORTag
 from numcodecs.compat import ensure_bytes  # type: ignore
 
-from .contentstore import ContentAddressableStore, MappingCAStore
+from .contentstore import ContentAddressableStore, IPFSStore, MappingCAStore
 from .utils import StreamLike
 
 if sys.version_info >= (3, 9):
@@ -45,11 +47,43 @@ inline_objects = {
 
 
 class IPLDStore(MutableMappingSB):
-    def __init__(self, castore: Optional[ContentAddressableStore] = None, sep: str = "/"):
+    def __init__(self, castore: Optional[ContentAddressableStore] = None, sep: str = "/", should_async_get: bool = True):
         self._mapping: Dict[str, Union[bytes, dag_cbor.encoding.EncodableType]] = {}
         self._store = castore or MappingCAStore()
+        if isinstance(self._store, IPFSStore) and should_async_get:
+            # Monkey patch zarr to use the async get of multiple chunks
+            def storage_getitems(kv_self, keys, on_error="omit"):
+                return kv_self._mutable_mapping.getitems(keys)
+            import zarr
+            zarr.KVStore.getitems = storage_getitems
         self.sep = sep
         self.root_cid: Optional[CID] = None
+
+    def getitems(self, keys: List[str]) -> Dict[str, bytes]:
+        if not isinstance(self._store, IPFSStore):
+            raise NotImplementedError("Multiget of keys only supported for IPFSStore")
+        cid_to_key_map = {}
+        key_to_bytes_map = {}
+        to_async_get = []
+        for key in keys:
+            key_parts = key.split(self.sep)
+            get_value = get_recursive(self._mapping, key_parts)
+            try:
+                # First see if this is a special key that doesn't need to be handled by the store
+                inline_codec = inline_objects[key_parts[-1]]
+                key_to_bytes_map[key] = inline_codec.encoder(get_value)
+            except KeyError:
+                # If it isn't, the key is an IPFS CID and needs to be passed to the store to be handled asynchronously
+                if isinstance(get_value, CBORTag):
+                    get_value = CID.decode(get_value.value[1:])
+                assert isinstance(get_value, CID)
+                cid_to_key_map[get_value] = key
+                to_async_get.append(get_value)
+        # Get the bytes for all CIDs asynchronously
+        cid_to_bytes_map = self._store.getitems(to_async_get)
+        for cid, key in cid_to_key_map.items():
+            key_to_bytes_map[key] = cid_to_bytes_map[cid]
+        return key_to_bytes_map
 
     def __getitem__(self, key: str) -> bytes:
         key_parts = key.split(self.sep)
