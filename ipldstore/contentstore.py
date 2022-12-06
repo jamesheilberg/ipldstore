@@ -13,6 +13,7 @@ from dag_cbor.encoding import EncodableType as DagCborEncodable
 from typing_validation import validate
 
 import requests
+from requests.adapters import HTTPAdapter, Retry
 
 from .car import read_car
 from .utils import StreamLike
@@ -29,6 +30,14 @@ def default_encoder(encoder, value):
 
 def grouper(seq, size):
     return (seq[pos:pos + size] for pos in range(0, len(seq), size))
+
+
+def get_retry_session() -> requests.Session:
+    session =  requests.Session()
+    retries = Retry(connect=5, total=5, backoff_factor=4)
+    session.mount("http://", HTTPAdapter(max_retries=retries))
+    return session
+
 
 class ContentAddressableStore(ABC):
     @abstractmethod
@@ -244,10 +253,13 @@ class IPFSStore(ContentAddressableStore):
 
     def get_raw(self, cid: CID) -> bytes:
         validate(cid, CID)
+
+        session = get_retry_session()
+
         if cid.codec == DagPbCodec:
-            res = requests.post(self._host + "/api/v0/cat", params={"arg": str(cid)})
+            res = session.post(self._host + "/api/v0/cat", params={"arg": str(cid)})
         else:
-            res = requests.post(self._host + "/api/v0/block/get", params={"arg": str(cid)})
+            res = session.post(self._host + "/api/v0/block/get", params={"arg": str(cid)})
         res.raise_for_status()
         return res.content
 
@@ -289,14 +301,16 @@ class IPFSStore(ContentAddressableStore):
         elif isinstance(codec, int):
             codec = multicodec.get(code=codec)
 
+        session = get_retry_session()
+
         if codec == DagPbCodec:
-            res = requests.post(self._host + "/api/v0/add",
+            res = session.post(self._host + "/api/v0/add",
                                 params={"pin": False, "chunker": self._chunker},
                                 files={"dummy": raw_value})
             res.raise_for_status()
             return CID.decode(res.json()["Hash"])
         else:
-            res = requests.post(self._host + "/api/v0/dag/put",
+            res = session.post(self._host + "/api/v0/dag/put",
                             params={"store-codec": codec.name,
                                     "input-codec": codec.name,
                                     "pin": should_pin,
