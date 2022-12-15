@@ -2,3 +2,5 @@ __pycache__
 .dmypy.json
 .tox
 *.egg-info
+build
+.pytest_cache
