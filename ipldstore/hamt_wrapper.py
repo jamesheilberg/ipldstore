@@ -1,17 +1,31 @@
 import cbor2
 import dag_cbor
-import mmh3
+from dataclasses import dataclass
+import hashlib
+import json
 import requests
+import typing
 from dask.distributed import Lock
 from multiformats import CID
 from py_hamt.hamt import Hamt, create, load
 
-inline_objects = [
-    ".zarray",
-    ".zgroup",
-    ".zmetadata",
-    ".zattrs",
-]
+@dataclass
+class InlineCodec:
+    decoder: typing.Callable[[bytes], typing.Any]
+    encoder: typing.Callable[[typing.Any], bytes]
+
+def json_dumps_bytes(obj: typing.Any) -> bytes:
+    return json.dumps(obj).encode("utf-8")
+
+json_inline_codec = InlineCodec(json.loads, json_dumps_bytes)
+
+
+inline_objects = {
+    ".zarray": json_inline_codec,
+    ".zgroup": json_inline_codec,
+    ".zmetadata": json_inline_codec,
+    ".zattrs": json_inline_codec,
+}
 
 
 class HamtIPFSStore:
@@ -46,12 +60,14 @@ class HamtWrapper:
 
     def __init__(self, store=HamtIPFSStore(), starting_id=None, others_dict=None):
         Hamt.register_hasher(
-            0x23, 4, lambda x: mmh3.hash(x, signed=False).to_bytes(4, byteorder="big")
+            0x12, 32, lambda x: hashlib.sha256(x.encode("utf-8")).digest()
         )
         if starting_id:
             self.hamt = load(store, starting_id)
         else:
-            self.hamt = create(store)
+            self.hamt = create(
+                store, options={"bit_width": 5, "bucket_size": 3, "hash_alg": 0x12}
+            )
 
         self.others_dict = others_dict if others_dict is not None else {}
 
@@ -96,9 +112,7 @@ class HamtWrapper:
         others_dict = d
         hamt_id = others_dict["hamt"]
         del others_dict["hamt"]
-        return HamtWrapper(
-            HamtIPFSStore(), starting_id=hamt_id, others_dict=others_dict
-        )
+        return HamtWrapper(starting_id=hamt_id, others_dict=others_dict)
 
 
 def set_recursive(obj, path, value) -> None:

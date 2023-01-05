@@ -5,7 +5,6 @@ Implementation of a MutableMapping based on IPLD data structures.
 from io import BufferedIOBase
 from collections.abc import MutableMapping
 import sys
-from dataclasses import dataclass
 from typing import Optional, Callable, Any, TypeVar, Union, Iterator, overload, List, Dict
 import json
 
@@ -16,7 +15,8 @@ from numcodecs.compat import ensure_bytes  # type: ignore
 
 from .contentstore import ContentAddressableStore, IPFSStore, MappingCAStore
 from .utils import StreamLike
-from .hamt_wrapper import HamtWrapper
+from .hamt_wrapper import HamtWrapper, inline_objects
+
 
 if sys.version_info >= (3, 9):
     MutableMappingT = MutableMapping
@@ -25,26 +25,6 @@ else:
     from typing import MutableMapping as MutableMappingT
 
     MutableMappingSB = MutableMapping
-
-
-@dataclass
-class InlineCodec:
-    decoder: Callable[[bytes], Any]
-    encoder: Callable[[Any], bytes]
-
-
-def json_dumps_bytes(obj: Any) -> bytes:
-    return json.dumps(obj).encode("utf-8")
-
-
-json_inline_codec = InlineCodec(json.loads, json_dumps_bytes)
-
-inline_objects = {
-    ".zarray": json_inline_codec,
-    ".zgroup": json_inline_codec,
-    ".zmetadata": json_inline_codec,
-    ".zattrs": json_inline_codec,
-}
 
 
 class IPLDStore(MutableMappingSB):
