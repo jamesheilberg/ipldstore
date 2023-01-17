@@ -6,10 +6,8 @@ from io import BufferedIOBase
 from collections.abc import MutableMapping
 import sys
 from typing import Optional, Callable, Any, TypeVar, Union, Iterator, overload, List, Dict
-import json
 
 from multiformats import CID
-import dag_cbor
 from cbor2 import CBORTag
 from numcodecs.compat import ensure_bytes  # type: ignore
 

@@ -1,4 +1,3 @@
-import cbor2
 import dag_cbor
 from dataclasses import dataclass
 import hashlib
@@ -7,15 +6,19 @@ import requests
 import typing
 from dask.distributed import Lock
 from multiformats import CID
+from multiformats import multihash
 from py_hamt.hamt import Hamt, create, load
+
 
 @dataclass
 class InlineCodec:
     decoder: typing.Callable[[bytes], typing.Any]
     encoder: typing.Callable[[typing.Any], bytes]
 
+
 def json_dumps_bytes(obj: typing.Any) -> bytes:
     return json.dumps(obj).encode("utf-8")
+
 
 json_inline_codec = InlineCodec(json.loads, json_dumps_bytes)
 
@@ -28,25 +31,32 @@ inline_objects = {
 }
 
 
+def get_cbor_dag_hash(obj):
+    ob_cbor = dag_cbor.encode(obj)
+    ob_cbor_hash = multihash.get("sha2-256").digest(ob_cbor)
+    return CID("base32", 1, "dag-cbor", ob_cbor_hash)
+
+
 class HamtIPFSStore:
+    def __init__(self):
+        self.mapping = {}
+
     def save(self, obj):
-        obj = dag_cbor.encode(obj)
-        res = requests.post(
-            "http://localhost:5001/api/v0/dag/put",
-            params={"store-codec": "dag-cbor", "input-codec": "dag-cbor", "pin": False},
-            files={"dummy": obj},
-        )
-        res.raise_for_status()
-        return CID.decode(res.json()["Cid"]["/"])
+        cid = get_cbor_dag_hash(obj)
+        self.mapping[cid] = obj
+        return cid
 
     def load(self, id):
-        if isinstance(id, cbor2.CBORTag):
-            id = CID.decode(id.value[1:])
-        res = requests.post(
-            "http://localhost:5001/api/v0/block/get", params={"arg": str(id)}
-        )
-        res.raise_for_status()
-        return dag_cbor.decode(res.content)
+        try:
+            return self.mapping[id]
+        except KeyError:
+            res = requests.post(
+                "http://localhost:5001/api/v0/block/get", params={"arg": str(id)}
+            )
+            res.raise_for_status()
+            obj = dag_cbor.decode(res.content)
+            self.mapping[id] = obj
+            return obj
 
     def is_equal(self, id1: CID, id2: CID):
         return str(id1) == str(id2)
@@ -62,6 +72,7 @@ class HamtWrapper:
         Hamt.register_hasher(
             0x12, 32, lambda x: hashlib.sha256(x.encode("utf-8")).digest()
         )
+
         if starting_id:
             self.hamt = load(store, starting_id)
         else:
@@ -105,6 +116,14 @@ class HamtWrapper:
                 yield prefix + key
 
     def to_dict(self):
+        for id in self.hamt.ids():
+            obj = self.hamt.store.mapping[id]
+            obj = dag_cbor.encode(obj)
+            res = requests.post(
+                "http://localhost:5001/api/v0/block/put?cid-codec=dag-cbor",
+                files={"dummy": obj},
+            )
+            res.raise_for_status()
         return {**self.others_dict, "hamt": self.hamt.id}
 
     @staticmethod
