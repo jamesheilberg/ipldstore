@@ -77,7 +77,7 @@ class HamtWrapper:
             self.hamt = load(store, starting_id)
         else:
             self.hamt = create(
-                store, options={"bit_width": 5, "bucket_size": 3, "hash_alg": 0x12}
+                store, options={"bit_width": 8, "bucket_size": 5, "hash_alg": 0x12}
             )
 
         self.others_dict = others_dict if others_dict is not None else {}
