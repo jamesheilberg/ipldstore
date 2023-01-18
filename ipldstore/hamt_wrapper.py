@@ -31,13 +31,27 @@ inline_objects = {
 }
 
 
-def get_cbor_dag_hash(obj):
+def get_cbor_dag_hash(obj) -> CID:
+    """Generates the IPFS hash an object would have if it were put to IPFS as dag-cbor,
+        without actually making an IPFS call (much faster)
+
+    Args:
+        obj: object to generate hash for
+
+    Returns:
+        CID: cid for object in dag-cbor
+    """
     ob_cbor = dag_cbor.encode(obj)
     ob_cbor_hash = multihash.get("sha2-256").digest(ob_cbor)
     return CID("base32", 1, "dag-cbor", ob_cbor_hash)
 
 
 class HamtIPFSStore:
+    """Class implementing methods necessary for a HAMT store. Unlike other stores, does not save objects 
+        permanently -- instead, stores them in memory and generates an ID without actually persisting the object.
+        It is the responsibility of the user to save all the HAMTs keys on their own if they
+        wish the HAMT to persist.
+    """
     def __init__(self):
         self.mapping = {}
 
@@ -68,30 +82,67 @@ class HamtIPFSStore:
 class HamtWrapper:
     SEP = "/"
 
-    def __init__(self, store=HamtIPFSStore(), starting_id=None, others_dict=None):
+    def __init__(
+        self,
+        store=HamtIPFSStore(),
+        starting_id: typing.Optional[CID] = None,
+        others_dict: dict = None,
+    ) -> None:
+        """
+        Args:
+            store (optional): Backing store for underyling HAMT. Defaults to HamtIPFSStore().
+            starting_id (typing.Optional[CID], optional):
+                CID with which to initialize HAMT. In this implementation, the HAMT will only include
+                keys corresponding to zarr chunks, represented by dag-pb CIDs. Defaults to None.
+            others_dict (dict, optional):
+                Starting dict for keys that aren't going to be put in the HAMT. Defaults to None.
+        """
+
+        # Register the sha2-256 hash with HAMT
         Hamt.register_hasher(
             0x12, 32, lambda x: hashlib.sha256(x.encode("utf-8")).digest()
         )
 
         if starting_id:
+            # Load HAMT from store using given id
             self.hamt = load(store, starting_id)
         else:
+            # Create HAMT from scratch with sensible default options
             self.hamt = create(
                 store, options={"bit_width": 8, "bucket_size": 5, "hash_alg": 0x12}
             )
 
         self.others_dict = others_dict if others_dict is not None else {}
 
-    def get(self, key_path):
+    def get(self, key_path: typing.List[str]):
+        """Get the value located at a `key_path`. First checks the HAMT, and if unable to find the key,
+            checks `others_dict`. If not in either, raises `KeyError`
+
+        Args:
+            key_path (typing.List[str]): decomposed key for which to find value
+
+        Returns:
+            value located at this `key_path`
+        """
         try:
             return self.hamt.get(self.SEP.join(key_path))
         except KeyError:
             return get_recursive(self.others_dict, key_path)
 
-    def set(self, key_path, value):
+    def set(self, key_path: typing.List[str], value) -> None:
+        """Sets a `key_path` to a given `value`. If the value is a dag-pb CID, then sets the HAMT.
+            Otherwise, sets `others_dict`.
+
+        Args:
+            key_path (typing.List[str]): decomposed key for which to set value
+            value: value to set
+        """
         if isinstance(value, CID) and value.codec.name == "dag-pb":
+            # We need to lock the HAMT to prevent multiple threads writing to it at once,
+            # as it is not thread safe
             try:
-                lock = Lock("x")
+                # lock needs name so dask knows to recognize it across threads
+                lock = Lock("hamt-write")
                 lock.acquire()
             except ValueError:
                 lock = None
@@ -101,11 +152,26 @@ class HamtWrapper:
         else:
             set_recursive(self.others_dict, key_path, value)
 
-    def iter_all(self):
+    def iter_all(self) -> typing.Iterator[str]:
+        """Iterates over all keys in both `others_dict` and the HAMT
+
+        Yields:
+            str: key
+        """
         yield from self._iter_nested("", self.others_dict)
         yield from self.hamt.keys()
 
-    def _iter_nested(self, prefix: str, mapping):
+    def _iter_nested(self, prefix: str, mapping: dict) -> typing.Iterator[str]:
+        """Iterates over all keys in `mapping`, reconstructing the key from decomposed
+            version when necessary
+
+        Args:
+            prefix (str): parts of key that have been used up intil this point in the recursion
+            mapping (dict): dict to pull keys from
+
+        Yields:
+            str: key
+        """
         for key, value in mapping.items():
             key_parts = key.split(self.SEP)
             if key_parts[-1] in inline_objects:
@@ -115,7 +181,13 @@ class HamtWrapper:
             else:
                 yield prefix + key
 
-    def to_dict(self):
+    def to_dict(self) -> dict:
+        """Stores all keys in the HAMT permanently in IPFS, then returns a dict representation
+            of the whole data structure
+
+        Returns:
+            dict: dict representation of `self`, including both `others_dict` and `hamt`
+        """
         for id in self.hamt.ids():
             obj = self.hamt.store.mapping[id]
             obj = dag_cbor.encode(obj)
@@ -127,7 +199,15 @@ class HamtWrapper:
         return {**self.others_dict, "hamt": self.hamt.id}
 
     @staticmethod
-    def from_dict(d):
+    def from_dict(d: dict) -> "HamtWrapper":
+        """Takes a dict generated by `to_dict` and turns it back into a HAMT.
+
+        Args:
+            d (dict): generated by `to_dict`
+
+        Returns:
+            HamtWrapper: corresponds to this dict `d`
+        """
         others_dict = d
         hamt_id = others_dict["hamt"]
         del others_dict["hamt"]
