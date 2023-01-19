@@ -1,4 +1,4 @@
-import dag_cbor
+import cbor2
 from dataclasses import dataclass
 import hashlib
 import json
@@ -30,20 +30,22 @@ inline_objects = {
     ".zattrs": json_inline_codec,
 }
 
+def default_encoder(encoder, value):
+    encoder.encode(cbor2.CBORTag(42,  b'\x00' + bytes(value)))
 
-def get_cbor_dag_hash(obj) -> CID:
-    """Generates the IPFS hash an object would have if it were put to IPFS as dag-cbor,
+
+def get_cbor_dag_hash(obj) -> typing.Tuple[CID, bytes]:
+    """Generates the IPFS hash and bytes an object would have if it were put to IPFS as dag-cbor,
         without actually making an IPFS call (much faster)
 
     Args:
-        obj: object to generate hash for
-
+        obj: object to generate hash and dag-cbor bytes for
     Returns:
-        CID: cid for object in dag-cbor
+        typing.Tuple[CID, bytes]: IPFS hash and dag-cbor bytes
     """
-    ob_cbor = dag_cbor.encode(obj)
-    ob_cbor_hash = multihash.get("sha2-256").digest(ob_cbor)
-    return CID("base32", 1, "dag-cbor", ob_cbor_hash)
+    obj_cbor = cbor2.dumps(obj, default=default_encoder)
+    obj_cbor_hash = multihash.get("sha2-256").digest(obj_cbor)
+    return CID("base32", 1, "dag-cbor", obj_cbor_hash), obj_cbor
 
 
 class HamtIPFSStore:
@@ -56,26 +58,30 @@ class HamtIPFSStore:
         self.mapping = {}
 
     def save(self, obj):
-        cid = get_cbor_dag_hash(obj)
-        self.mapping[cid] = obj
+        cid, obj_cbor = get_cbor_dag_hash(obj)
+        self.mapping[cid] = obj_cbor
         return cid
 
     def load(self, id):
+        if isinstance(id, cbor2.CBORTag):
+            id = CID.decode(id.value[1:])
         try:
-            return self.mapping[id]
+            return cbor2.loads(self.mapping[id])
         except KeyError:
             res = requests.post(
                 "http://localhost:5001/api/v0/block/get", params={"arg": str(id)}
             )
             res.raise_for_status()
-            obj = dag_cbor.decode(res.content)
-            self.mapping[id] = obj
+            obj = cbor2.loads(res.content)
+            self.mapping[id] = res.content
             return obj
 
     def is_equal(self, id1: CID, id2: CID):
         return str(id1) == str(id2)
 
     def is_link(self, obj: CID):
+        if isinstance(obj, cbor2.CBORTag):
+            obj = CID.decode(obj.value[1:])
         return isinstance(obj, CID) and obj.codec.name == "dag-cbor"
 
 
@@ -189,11 +195,10 @@ class HamtWrapper:
             dict: dict representation of `self`, including both `others_dict` and `hamt`
         """
         for id in self.hamt.ids():
-            obj = self.hamt.store.mapping[id]
-            obj = dag_cbor.encode(obj)
+            obj_cbor = self.hamt.store.mapping[id]
             res = requests.post(
                 "http://localhost:5001/api/v0/block/put?cid-codec=dag-cbor",
-                files={"dummy": obj},
+                files={"dummy": obj_cbor},
             )
             res.raise_for_status()
         return {**self.others_dict, "hamt": self.hamt.id}
