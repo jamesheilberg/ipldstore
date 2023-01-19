@@ -1,4 +1,4 @@
-import cbor2
+import dag_cbor
 from dataclasses import dataclass
 import hashlib
 import json
@@ -30,9 +30,6 @@ inline_objects = {
     ".zattrs": json_inline_codec,
 }
 
-def default_encoder(encoder, value):
-    encoder.encode(cbor2.CBORTag(42,  b'\x00' + bytes(value)))
-
 
 def get_cbor_dag_hash(obj) -> typing.Tuple[CID, bytes]:
     """Generates the IPFS hash and bytes an object would have if it were put to IPFS as dag-cbor,
@@ -43,17 +40,18 @@ def get_cbor_dag_hash(obj) -> typing.Tuple[CID, bytes]:
     Returns:
         typing.Tuple[CID, bytes]: IPFS hash and dag-cbor bytes
     """
-    obj_cbor = cbor2.dumps(obj, default=default_encoder)
+    obj_cbor = dag_cbor.encode(obj)
     obj_cbor_hash = multihash.get("sha2-256").digest(obj_cbor)
     return CID("base32", 1, "dag-cbor", obj_cbor_hash), obj_cbor
 
 
 class HamtIPFSStore:
-    """Class implementing methods necessary for a HAMT store. Unlike other stores, does not save objects 
-        permanently -- instead, stores them in memory and generates an ID without actually persisting the object.
-        It is the responsibility of the user to save all the HAMTs keys on their own if they
-        wish the HAMT to persist.
+    """Class implementing methods necessary for a HAMT store. Unlike other stores, does not save objects
+    permanently -- instead, stores them in memory and generates an ID without actually persisting the object.
+    It is the responsibility of the user to save all the HAMTs keys on their own if they
+    wish the HAMT to persist.
     """
+
     def __init__(self):
         self.mapping = {}
 
@@ -63,16 +61,14 @@ class HamtIPFSStore:
         return cid
 
     def load(self, id):
-        if isinstance(id, cbor2.CBORTag):
-            id = CID.decode(id.value[1:])
         try:
-            return cbor2.loads(self.mapping[id])
+            return dag_cbor.decode(self.mapping[id])
         except KeyError:
             res = requests.post(
                 "http://localhost:5001/api/v0/block/get", params={"arg": str(id)}
             )
             res.raise_for_status()
-            obj = cbor2.loads(res.content)
+            obj = dag_cbor.decode(res.content)
             self.mapping[id] = res.content
             return obj
 
@@ -80,8 +76,6 @@ class HamtIPFSStore:
         return str(id1) == str(id2)
 
     def is_link(self, obj: CID):
-        if isinstance(obj, cbor2.CBORTag):
-            obj = CID.decode(obj.value[1:])
         return isinstance(obj, CID) and obj.codec.name == "dag-cbor"
 
 
