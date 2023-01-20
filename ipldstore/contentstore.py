@@ -7,8 +7,7 @@ import aiohttp
 import asyncio
 
 from multiformats import CID, multicodec, multibase, multihash, varint
-import dag_cbor
-from cbor2 import CBORTag
+import cbor2
 from dag_cbor.encoding import EncodableType as DagCborEncodable
 from typing_validation import validate
 
@@ -33,6 +32,9 @@ def get_retry_session() -> requests.Session:
     return session
 
 
+def default_encoder(encoder, value):
+    encoder.encode(cbor2.CBORTag(42,  b'\x00' + bytes(value)))
+
 class ContentAddressableStore(ABC):
     @abstractmethod
     def get_raw(self, cid: CID) -> bytes:
@@ -43,7 +45,7 @@ class ContentAddressableStore(ABC):
         if cid.codec == RawCodec:
             return value
         elif cid.codec == DagCborCodec:
-            return dag_cbor.decode(value)
+            return cbor2.loads(value)
         else:
             raise ValueError(f"can't decode CID's codec '{cid.codec.name}'")
 
@@ -66,72 +68,10 @@ class ContentAddressableStore(ABC):
         if isinstance(value, bytes):
             return self.put_raw(value, RawCodec)
         else:
-            return self.put_raw(dag_cbor.encode(value), DagCborCodec)
+            return self.put_raw(cbor2.dumps(value, default=default_encoder), DagCborCodec)
 
     def normalize_cid(self, cid: CID) -> CID:  # pylint: disable=no-self-use
         return cid
-
-    @overload
-    def to_car(self, root: CID, stream: BufferedIOBase) -> int:
-        ...
-
-    @overload
-    def to_car(self, root: CID, stream: None = None) -> bytes:
-        ...
-
-    def to_car(self, root: CID, stream: Optional[BufferedIOBase] = None) -> Union[bytes, int]:
-        validate(root, CID)
-        validate(stream, Optional[BufferedIOBase])
-
-        if stream is None:
-            buffer = BytesIO()
-            stream = buffer
-            return_bytes = True
-        else:
-            return_bytes = False
-
-        bytes_written = 0
-        header = dag_cbor.encode({"version": 1, "roots": [root]})
-        bytes_written += stream.write(varint.encode(len(header)))
-        bytes_written += stream.write(header)
-        bytes_written += self._to_car(root, stream, set())
-
-        if return_bytes:
-            return buffer.getvalue()
-        else:
-            return bytes_written
-
-    def _to_car(self,
-                root: CID,
-                stream: BufferedIOBase,
-                already_written: MutableSet[CID]) -> int:
-        """
-            makes a CAR without the header
-        """
-        bytes_written = 0
-
-        if root not in already_written:
-            data = self.get_raw(root)
-            cid_bytes = bytes(root)
-            bytes_written += stream.write(varint.encode(len(cid_bytes) + len(data)))
-            bytes_written += stream.write(cid_bytes)
-            bytes_written += stream.write(data)
-            already_written.add(root)
-
-            if root.codec == DagCborCodec:
-                value = dag_cbor.decode(data)
-                for child in iter_links(value):
-                    bytes_written += self._to_car(child, stream, already_written)
-        return bytes_written
-
-    def import_car(self, stream_or_bytes: StreamLike) -> List[CID]:
-        roots, blocks = read_car(stream_or_bytes)
-        roots = [self.normalize_cid(root) for root in roots]
-
-        for cid, data, _ in blocks:
-            self.put_raw(bytes(data), cid.codec)
-
-        return roots
 
 
 class MappingCAStore(ContentAddressableStore):
@@ -219,7 +159,7 @@ class IPFSStore(ContentAddressableStore):
         if cid.codec == DagPbCodec:
             return value
         elif cid.codec == DagCborCodec:
-            return dag_cbor.decode(value)
+            return cbor2.loads(value)
         else:
             raise ValueError(f"can't decode CID's codec '{cid.codec.name}'")
 
@@ -245,7 +185,7 @@ class IPFSStore(ContentAddressableStore):
         if isinstance(value, bytes):
             return self.put_raw(value, DagPbCodec)
         else:
-            return self.put_raw(dag_cbor.encode(value), DagCborCodec)
+            return self.put_raw(cbor2.dumps(value, default=default_encoder), DagCborCodec)
 
     def put_raw(self,
                 raw_value: bytes,

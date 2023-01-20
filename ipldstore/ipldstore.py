@@ -56,7 +56,7 @@ class IPLDStore(MutableMappingSB):
             except KeyError:
                 # If it isn't, the key is an IPFS CID and needs to be passed to the store to be handled asynchronously
                 if isinstance(get_value, CBORTag):
-                    get_value = CID.decode(get_value.value[1:])
+                    get_value = CID.decode(get_value.value[1:]).set(base="base32")
                 assert isinstance(get_value, CID)
                 cid_to_key_map[get_value] = key
                 to_async_get.append(get_value)
@@ -73,7 +73,7 @@ class IPLDStore(MutableMappingSB):
             inline_codec = inline_objects[key_parts[-1]]
         except KeyError:
             if isinstance(get_value, CBORTag):
-                get_value = CID.decode(get_value.value[1:])
+                get_value = CID.decode(get_value.value[1:]).set(base="base32")
             assert isinstance(get_value, CID)
 
             res = self._store.get(get_value)
