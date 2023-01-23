@@ -30,8 +30,10 @@ inline_objects = {
     ".zattrs": json_inline_codec,
 }
 
+
 def default_encoder(encoder, value):
-    encoder.encode(cbor2.CBORTag(42,  b'\x00' + bytes(value)))
+    encoder.encode(cbor2.CBORTag(42, b"\x00" + bytes(value)))
+
 
 def get_cbor_dag_hash(obj) -> typing.Tuple[CID, bytes]:
     """Generates the IPFS hash and bytes an object would have if it were put to IPFS as dag-cbor,
@@ -68,9 +70,15 @@ class HamtIPFSStore:
         try:
             return cbor2.loads(self.mapping[cid])
         except KeyError:
-            res = requests.post(
-                "http://localhost:5001/api/v0/block/get", params={"arg": str(cid)}
-            )
+            try:
+                res = requests.post(
+                    "http://localhost:5001/api/v0/block/get",
+                    params={"arg": str(cid)},
+                    timeout=30,
+                )
+            except requests.exceptions.ReadTimeout:
+                print(f"timed out on {str(cid)}")
+                raise Exception(f"timed out on {str(cid)}")
             res.raise_for_status()
             obj = cbor2.loads(res.content)
             self.mapping[cid] = res.content
