@@ -154,15 +154,9 @@ class HamtWrapper:
         if isinstance(value, CID) and value.codec.name == "dag-pb":
             # We need to lock the HAMT to prevent multiple threads writing to it at once,
             # as it is not thread safe
-            try:
-                # lock needs name so dask knows to recognize it across threads
-                lock = Lock("hamt-write")
-                lock.acquire()
-            except ValueError:
-                lock = None
-            self.hamt = self.hamt.set(self.SEP.join(key_path), value)
-            if lock is not None:
-                lock.release()
+            # lock needs name so dask knows to recognize it across threads
+            with Lock("hamt-write"):
+                self.hamt = self.hamt.set(self.SEP.join(key_path), value)
         else:
             set_recursive(self.others_dict, key_path, value)
 
