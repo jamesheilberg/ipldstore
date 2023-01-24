@@ -6,7 +6,7 @@ import requests
 import typing
 from dask.distributed import Lock
 from multiformats import CID
-from multiformats import multihash
+from hashlib import sha256
 from py_hamt.hamt import Hamt, create, load
 
 
@@ -45,8 +45,11 @@ def get_cbor_dag_hash(obj) -> typing.Tuple[CID, bytes]:
         typing.Tuple[CID, bytes]: IPFS hash and dag-cbor bytes
     """
     obj_cbor = cbor2.dumps(obj, default=default_encoder)
-    obj_cbor_hash = multihash.get("sha2-256").digest(obj_cbor)
-    return CID("base32", 1, "dag-cbor", obj_cbor_hash), obj_cbor
+
+    # the multihash format prefixes the raw sha256 digest with two bytes:
+    # 18 (the multicodec code for sha256) and 32 (the length of the digest in bytes)
+    obj_cbor_multi_hash = bytes([18, 32]) + sha256(obj_cbor).digest()
+    return CID("base32", 1, "dag-cbor", obj_cbor_multi_hash), obj_cbor
 
 
 class HamtIPFSStore:
@@ -89,7 +92,9 @@ class HamtIPFSStore:
 
     def is_link(self, obj: CID):
         if isinstance(obj, cbor2.CBORTag):
-            obj = CID.decode(obj.value[1:]).set(base="base32")
+            # dag-cbor tags have 37 bytes in their value:
+            # 1 from CBORTag prefix, 1 from version, 34 from multihash digest, 1 from codec
+            return obj.tag == 42 and len(obj.value) == 37
         return isinstance(obj, CID) and obj.codec.name == "dag-cbor"
 
 
