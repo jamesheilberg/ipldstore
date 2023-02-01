@@ -2,6 +2,7 @@ import cbor2
 from dataclasses import dataclass
 import hashlib
 import json
+import psutil
 import requests
 import typing
 from dask.distributed import Lock
@@ -61,11 +62,20 @@ class HamtIPFSStore:
 
     def __init__(self):
         self.mapping = {}
+        self.num_bytes_in_mapping = 0
 
     def save(self, obj):
         cid, obj_cbor = get_cbor_dag_hash(obj)
         self.mapping[cid] = obj_cbor
+        self.num_bytes_in_mapping += len(obj_cbor)
         return cid
+
+    def garbage_collect_mapping(self, hamt: Hamt):
+        hamt_keys = set(hamt.ids())
+        to_delete = [key for key in self.mapping if key not in hamt_keys]
+        for key in to_delete:
+            self.num_bytes_in_mapping -= len(self.mapping[key])
+            del self.mapping[key]
 
     def load(self, cid):
         if isinstance(cid, cbor2.CBORTag):
@@ -101,6 +111,9 @@ class HamtIPFSStore:
 class HamtWrapper:
     SEP = "/"
 
+    MAX_PERCENT_OF_RAM_FOR_MAPPING = 0.1
+    MIN_GC_RATIO_BEFORE_FAILURE = 1.1
+
     def __init__(
         self,
         store=HamtIPFSStore(),
@@ -132,6 +145,7 @@ class HamtWrapper:
             )
 
         self.others_dict = others_dict if others_dict is not None else {}
+        self._system_ram = psutil.virtual_memory().total
 
     def get(self, key_path: typing.List[str]):
         """Get the value located at a `key_path`. First checks the HAMT, and if unable to find the key,
@@ -162,6 +176,20 @@ class HamtWrapper:
             # lock needs name so dask knows to recognize it across threads
             with Lock("hamt-write"):
                 self.hamt = self.hamt.set(self.SEP.join(key_path), value)
+                percent_ram_used_by_mapping = (
+                    self.hamt.store.num_bytes_in_mapping / self._system_ram
+                )
+                if percent_ram_used_by_mapping > self.MAX_PERCENT_OF_RAM_FOR_MAPPING:
+                    num_ids_in_hamt = sum(1 for _ in self.hamt.ids())
+                    if (
+                        len(self.hamt.store.mapping)
+                        > self.MIN_GC_RATIO_BEFORE_FAILURE * num_ids_in_hamt
+                    ):
+                        self.hamt.store.garbage_collect_mapping(self.hamt)
+                    else:
+                        raise RuntimeError(
+                            "HAMT mapping is taking up more than 0.1 of system RAM and gc won't help much, abort"
+                        )
         else:
             set_recursive(self.others_dict, key_path, value)
 
