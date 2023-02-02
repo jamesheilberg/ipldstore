@@ -71,8 +71,13 @@ class HamtIPFSStore:
         return cid
 
     def garbage_collect_mapping(self, hamt: Hamt):
-        hamt_keys = set(hamt.ids())
-        to_delete = [key for key in self.mapping if key not in hamt_keys]
+        hamt_ids = set()
+        for hamt_id in hamt.ids():
+            if isinstance(hamt_id, cbor2.CBORTag):
+                hamt_ids.add(CID.decode(hamt_id.value[1:]).set(base="base32"))
+            else:
+                hamt_ids.add(hamt_id)
+        to_delete = [key for key in self.mapping if key not in hamt_ids]
         for key in to_delete:
             self.num_bytes_in_mapping -= len(self.mapping[key])
             del self.mapping[key]
@@ -188,7 +193,7 @@ class HamtWrapper:
                         self.hamt.store.garbage_collect_mapping(self.hamt)
                     else:
                         raise RuntimeError(
-                            "HAMT mapping is taking up more than 0.1 of system RAM and gc won't help much, abort"
+                            f"HAMT mapping is taking up more than {self.MAX_PERCENT_OF_RAM_FOR_MAPPING} of system RAM and gc won't help much, abort"
                         )
         else:
             set_recursive(self.others_dict, key_path, value)
