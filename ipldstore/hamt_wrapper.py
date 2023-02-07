@@ -235,6 +235,8 @@ class HamtWrapper:
             dict: dict representation of `self`, including both `others_dict` and `hamt`
         """
         for id in self.hamt.ids():
+            if isinstance(id, cbor2.CBORTag):
+                id = CID.decode(id.value[1:]).set(base="base32")
             obj_cbor = self.hamt.store.mapping[id]
             res = requests.post(
                 "http://localhost:5001/api/v0/block/put?cid-codec=dag-cbor",
