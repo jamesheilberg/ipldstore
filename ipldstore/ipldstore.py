@@ -27,6 +27,7 @@ else:
 
 class IPLDStore(MutableMappingSB):
     def __init__(self, castore: Optional[ContentAddressableStore] = None, sep: str = "/", should_async_get: bool = True):
+        # In this iteration of IPLDStore, we use a HAMT to store zarr chunks instead of a dict
         self._mapping = HamtWrapper()
         self._store = castore or MappingCAStore()
         if isinstance(self._store, IPFSStore) and should_async_get:

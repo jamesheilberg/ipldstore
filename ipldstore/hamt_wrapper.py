@@ -53,7 +53,7 @@ def get_cbor_dag_hash(obj) -> typing.Tuple[CID, bytes]:
     return CID("base32", 1, "dag-cbor", obj_cbor_multi_hash), obj_cbor
 
 
-class HamtIPFSStore:
+class HamtMemoryStore:
     """Class implementing methods necessary for a HAMT store. Unlike other stores, does not save objects
     permanently -- instead, stores them in memory and generates an ID without actually persisting the object.
     It is the responsibility of the user to save all the HAMTs keys on their own if they
@@ -61,16 +61,35 @@ class HamtIPFSStore:
     """
 
     def __init__(self):
-        self.mapping = {}
+        self.mapping: typing.Dict[CID, bytes] = {}
         self.num_bytes_in_mapping = 0
 
-    def save(self, obj):
+    def save(self, obj) -> CID:
+        """Generate an ID for object and store the CID and a dag_cbor representation of the object
+            in the store's mapping. Also tracks how large mapping is by adding the length of the dag_cbor
+            representation.
+
+        Args:
+            obj: object being stored in HAMT
+
+        Returns:
+            CID: dag-cbor hash for object
+        """
         cid, obj_cbor = get_cbor_dag_hash(obj)
         self.mapping[cid] = obj_cbor
         self.num_bytes_in_mapping += len(obj_cbor)
         return cid
 
     def garbage_collect_mapping(self, hamt: Hamt):
+        """Removes all CIDs in the store's mapping not present in the provided HAMT. Useful because, in general,
+            the intermediate states stored in the mapping are not necesary to persist and can consume 100s of GBs
+            of RAM when generating large HAMTs.
+
+
+        Args:
+            hamt (Hamt): HAMT whose CIDs will be persisted -- ids that are in the store's mapping but not
+                in `hamt` will be deleted from the mapping.
+        """
         hamt_ids = set()
         for hamt_id in hamt.ids():
             if isinstance(hamt_id, cbor2.CBORTag):
@@ -82,7 +101,20 @@ class HamtIPFSStore:
             self.num_bytes_in_mapping -= len(self.mapping[key])
             del self.mapping[key]
 
-    def load(self, cid):
+    def load(self, cid: typing.Union[cbor2.CBORTag, CID]):
+        """Given a dag-cbor CID, returns the corresponding object. First checks to see if
+            CID is present in store's mapping. If not, then checks IFPS, and finally fails if
+            the CID can't be found in 30s.
+
+        Args:
+            cid typing.Union[cbor2.CBORTag, CID]: CID to load. Might initially be in CBORTag form
+                due to the fact that we use cbor2 to encode objects for speed.
+
+        Raises:
+            Exception: Raised when CID cannot be located in store's mapping or IPFS.
+
+        Returns: object whose dag-cbor hash is the CID
+        """
         if isinstance(cid, cbor2.CBORTag):
             cid = CID.decode(cid.value[1:]).set(base="base32")
         try:
@@ -95,7 +127,6 @@ class HamtIPFSStore:
                     timeout=30,
                 )
             except requests.exceptions.ReadTimeout:
-                print(f"timed out on {str(cid)}")
                 raise Exception(f"timed out on {str(cid)}")
             res.raise_for_status()
             obj = cbor2.loads(res.content)
@@ -109,6 +140,7 @@ class HamtIPFSStore:
         if isinstance(obj, cbor2.CBORTag):
             # dag-cbor tags have 37 bytes in their value:
             # 1 from CBORTag prefix, 1 from version, 34 from multihash digest, 1 from codec
+            # dag-pb v0 hashes have fewer.
             return obj.tag == 42 and len(obj.value) == 37
         return isinstance(obj, CID) and obj.codec.name == "dag-cbor"
 
@@ -121,13 +153,11 @@ class HamtWrapper:
 
     def __init__(
         self,
-        store=HamtIPFSStore(),
         starting_id: typing.Optional[CID] = None,
         others_dict: dict = None,
     ) -> None:
         """
         Args:
-            store (optional): Backing store for underyling HAMT. Defaults to HamtIPFSStore().
             starting_id (typing.Optional[CID], optional):
                 CID with which to initialize HAMT. In this implementation, the HAMT will only include
                 keys corresponding to zarr chunks, represented by dag-pb CIDs. Defaults to None.
@@ -139,6 +169,7 @@ class HamtWrapper:
         Hamt.register_hasher(
             0x12, 32, lambda x: hashlib.sha256(x.encode("utf-8")).digest()
         )
+        store = HamtMemoryStore()
 
         if starting_id:
             # Load HAMT from store using given id
@@ -181,17 +212,24 @@ class HamtWrapper:
             # lock needs name so dask knows to recognize it across threads
             with Lock("hamt-write"):
                 self.hamt = self.hamt.set(self.SEP.join(key_path), value)
+                # Now check if the percent of system RAM used by the store's mapping exceeds a 10% threshold
                 percent_ram_used_by_mapping = (
                     self.hamt.store.num_bytes_in_mapping / self._system_ram
                 )
                 if percent_ram_used_by_mapping > self.MAX_PERCENT_OF_RAM_FOR_MAPPING:
+                    # If it does exceed the threshold, next determine if the store's mapping is larger
+                    # than the HAMT by a 10% margin.
+                    # here, we use number of IDs in the HAMT as a proxy for the HAMT's size
                     num_ids_in_hamt = sum(1 for _ in self.hamt.ids())
                     if (
                         len(self.hamt.store.mapping)
                         > self.MIN_GC_RATIO_BEFORE_FAILURE * num_ids_in_hamt
                     ):
+                        # If both criteria are met, we can save signficant RAM by GCing, so do so.
                         self.hamt.store.garbage_collect_mapping(self.hamt)
                     else:
+                        # If the first criterium is met but not the second, then the HAMT itself is too large to comfortably
+                        # fit in memory, and we abort the parse.
                         raise RuntimeError(
                             f"HAMT mapping is taking up more than {self.MAX_PERCENT_OF_RAM_FOR_MAPPING} of system RAM and gc won't help much, abort"
                         )
