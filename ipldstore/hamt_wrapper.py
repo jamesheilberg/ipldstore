@@ -8,7 +8,7 @@ import typing
 from dask.distributed import Lock
 from multiformats import CID
 from hashlib import sha256
-from py_hamt.hamt import Hamt, create, load
+from py_hamt.hamt import Hamt, load
 
 
 @dataclass
@@ -176,7 +176,7 @@ class HamtWrapper:
             self.hamt = load(store, starting_id)
         else:
             # Create HAMT from scratch with sensible default options
-            self.hamt = create(
+            self.hamt = Hamt.create(
                 store, options={"bit_width": 8, "bucket_size": 5, "hash_alg": 0x12}
             )
 
