@@ -181,7 +181,7 @@ class HamtWrapper:
 
         # Register the sha2-256 hash with HAMT
         Hamt.register_hasher(
-            0x12, 32, lambda x: hashlib.sha256(x.encode("utf-8")).digest()
+            0x12, 32, lambda x: hashlib.sha256(x).digest()
         )
         store = HamtMemoryStore()
 
@@ -191,7 +191,7 @@ class HamtWrapper:
         else:
             # Create HAMT from scratch with sensible default options
             self.hamt = Hamt.create(
-                store, options={"bit_width": 8, "bucket_size": 5, "hash_alg": 0x12}
+                store, options={"bitWidth": 8, "bucketSize": 5, "hashAlg": 0x12}
             )
 
         self.others_dict = others_dict if others_dict is not None else {}
