@@ -258,7 +258,7 @@ class HamtWrapper:
             str: key
         """
         yield from self._iter_nested("", self.others_dict)
-        yield from self.hamt.keys()
+        yield from (key.decode("utf-8") for key in self.hamt.keys())
 
     def _iter_nested(self, prefix: str, mapping: dict) -> typing.Iterator[str]:
         """Iterates over all keys in `mapping`, reconstructing the key from decomposed
