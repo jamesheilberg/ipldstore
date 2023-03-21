@@ -2,59 +2,41 @@
 Implementation of a MutableMapping based on IPLD data structures.
 """
 
-
-
 from io import BufferedIOBase
 from collections.abc import MutableMapping
 import sys
-from dataclasses import dataclass
 from typing import Optional, Callable, Any, TypeVar, Union, Iterator, overload, List, Dict
-import json
 
 from multiformats import CID
-import dag_cbor
 from cbor2 import CBORTag
 from numcodecs.compat import ensure_bytes  # type: ignore
 
 from .contentstore import ContentAddressableStore, IPFSStore, MappingCAStore
 from .utils import StreamLike
+from .hamt_wrapper import HamtWrapper, inline_objects
+
 
 if sys.version_info >= (3, 9):
     MutableMappingT = MutableMapping
     MutableMappingSB = MutableMapping[str, bytes]
 else:
     from typing import MutableMapping as MutableMappingT
+
     MutableMappingSB = MutableMapping
-
-@dataclass
-class InlineCodec:
-    decoder: Callable[[bytes], Any]
-    encoder: Callable[[Any], bytes]
-
-
-def json_dumps_bytes(obj: Any) -> bytes:
-    return json.dumps(obj).encode("utf-8")
-
-
-json_inline_codec = InlineCodec(json.loads, json_dumps_bytes)
-
-inline_objects = {
-    ".zarray": json_inline_codec,
-    ".zgroup": json_inline_codec,
-    ".zmetadata": json_inline_codec,
-    ".zattrs": json_inline_codec,
-}
 
 
 class IPLDStore(MutableMappingSB):
     def __init__(self, castore: Optional[ContentAddressableStore] = None, sep: str = "/", should_async_get: bool = True):
-        self._mapping: Dict[str, Union[bytes, dag_cbor.encoding.EncodableType]] = {}
+        # In this iteration of IPLDStore, we use a HAMT to store zarr chunks instead of a dict
+        self._mapping = HamtWrapper()
         self._store = castore or MappingCAStore()
         if isinstance(self._store, IPFSStore) and should_async_get:
             # Monkey patch zarr to use the async get of multiple chunks
             def storage_getitems(kv_self, keys, on_error="omit"):
                 return kv_self._mutable_mapping.getitems(keys)
+
             import zarr
+
             zarr.KVStore.getitems = storage_getitems
         self.sep = sep
         self.root_cid: Optional[CID] = None
@@ -67,7 +49,7 @@ class IPLDStore(MutableMappingSB):
         to_async_get = []
         for key in keys:
             key_parts = key.split(self.sep)
-            get_value = get_recursive(self._mapping, key_parts)
+            get_value = self._mapping.get(key_parts)
             try:
                 # First see if this is a special key that doesn't need to be handled by the store
                 inline_codec = inline_objects[key_parts[-1]]
@@ -75,7 +57,7 @@ class IPLDStore(MutableMappingSB):
             except KeyError:
                 # If it isn't, the key is an IPFS CID and needs to be passed to the store to be handled asynchronously
                 if isinstance(get_value, CBORTag):
-                    get_value = CID.decode(get_value.value[1:])
+                    get_value = CID.decode(get_value.value[1:]).set(base="base32")
                 assert isinstance(get_value, CID)
                 cid_to_key_map[get_value] = key
                 to_async_get.append(get_value)
@@ -87,13 +69,14 @@ class IPLDStore(MutableMappingSB):
 
     def __getitem__(self, key: str) -> bytes:
         key_parts = key.split(self.sep)
-        get_value = get_recursive(self._mapping, key_parts)
+        get_value = self._mapping.get(key_parts)
         try:
             inline_codec = inline_objects[key_parts[-1]]
         except KeyError:
             if isinstance(get_value, CBORTag):
-                get_value = CID.decode(get_value.value[1:])
+                get_value = CID.decode(get_value.value[1:]).set(base="base32")
             assert isinstance(get_value, CID)
+
             res = self._store.get(get_value)
             assert isinstance(res, bytes)
             return res
@@ -111,41 +94,32 @@ class IPLDStore(MutableMappingSB):
             set_value = cid
         else:
             set_value = inline_codec.decoder(value)
-
+        self._mapping.set(key_parts, set_value)
         self.root_cid = None
-        set_recursive(self._mapping, key_parts, set_value)
 
     def __delitem__(self, key: str) -> None:
-        key_parts = key.split(self.sep)
-        del_recursive(self._mapping, key_parts)
+        # key_parts = key.split(self.sep)
+        # del_recursive(self._mapping, key_parts)
+        raise NotImplementedError
 
     def __iter__(self) -> Iterator[str]:
-        return self._iter_nested("", self._mapping)
-
-    def _iter_nested(self, prefix: str, mapping: Dict[str, Union[bytes, dag_cbor.encoding.EncodableType]]) -> Iterator[str]:
-        for key, value in mapping.items():
-            key_parts = key.split(self.sep)
-            if key_parts[-1] in inline_objects:
-                yield prefix + key
-            elif isinstance(value, dict):
-                yield from self._iter_nested(prefix + key + self.sep, value)
-            else:
-                yield prefix + key
+        # return self._iter_nested("", self._mapping)
+        return self._mapping.iter_all()
 
     def __len__(self) -> int:
-        return len(list(iter(self)))
+        return len(list(self._mapping.iter_all()))
 
     def freeze(self) -> CID:
         """
-            Store current version and return the corresponding root cid.
+        Store current version and return the corresponding root cid.
         """
         if self.root_cid is None:
-            self.root_cid = self._store.put(self._mapping)
+            self.root_cid = self._store.put(self._mapping.to_dict())
         return self.root_cid
 
     def clear(self) -> None:
         self.root_cid = None
-        self._mapping = {}
+        self._mapping = HamtWrapper()
 
     @overload
     def to_car(self, stream: BufferedIOBase) -> int:
@@ -175,36 +149,11 @@ class IPLDStore(MutableMappingSB):
             cid = CID.decode(cid)
         assert cid in self._store
         self.root_cid = cid
-        self._mapping = self._store.get(cid)  # type: ignore
+        whole_mapping = self._store.get(cid)
+        self._mapping = HamtWrapper.from_dict(whole_mapping)
 
 
 _T = TypeVar("_T")
 _V = TypeVar("_V")
 
 RecursiveMapping = MutableMappingT[_T, Union[_V, "RecursiveMapping"]]  # type: ignore
-
-
-def set_recursive(obj: RecursiveMapping[_T, _V], path: List[_T], value: _V) -> None:
-    assert len(path) >= 1
-    if len(path) == 1:
-        obj[path[0]] = value
-    else:
-        set_recursive(obj.setdefault(path[0], {}), path[1:], value)  # type: ignore
-
-
-def get_recursive(obj: RecursiveMapping[_T, _V], path: List[_T]) -> _V:
-    assert len(path) >= 1
-    if len(path) == 1:
-        return obj[path[0]]
-    else:
-        return get_recursive(obj[path[0]], path[1:])  # type: ignore
-
-
-def del_recursive(obj: MutableMappingT[_T, Any], path: List[_T]) -> None:
-    assert len(path) >= 1
-    if len(path) == 1:
-        del obj[path[0]]
-    else:
-        del_recursive(obj[path[0]], path[1:])
-        if len(obj[path[0]]) == 0:
-            del obj[path[0]]
