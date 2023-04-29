@@ -6,6 +6,7 @@ import json
 import psutil
 import requests
 import typing
+import os
 from dask.distributed import Lock, get_client
 from multiformats import CID
 from hashlib import sha256
@@ -136,7 +137,8 @@ class HamtMemoryStore:
         except KeyError:
             try:
                 res = requests.post(
-                    "http://localhost:5001/api/v0/block/get",
+                    # either use IPFS_HOST from environment or use localhost
+                    f"{os.getenv('IPFS_HOST') or 'http://localhost'}/api/v0/block/get",
                     params={"arg": str(cid)},
                     timeout=30,
                 )
@@ -292,7 +294,8 @@ class HamtWrapper:
                 id = CID.decode(id.value[1:]).set(base="base32")
             obj_cbor = self.hamt.store.mapping[id]
             res = requests.post(
-                "http://localhost:5001/api/v0/block/put?cid-codec=dag-cbor",
+                # either use IPFS_HOST from environment or use localhost
+                f"{os.getenv('IPFS_HOST') or 'http://localhost'}/api/v0/block/put?cid-codec=dag-cbor",
                 files={"dummy": obj_cbor},
             )
             res.raise_for_status()
